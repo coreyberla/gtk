@@ -74,6 +74,7 @@ struct _GtkColumnViewColumn
   guint visible     : 1;
   guint resizable   : 1;
   guint expand      : 1;
+  guint cells_resize_queued : 1;
 
   GMenuModel *menu;
 
@@ -435,11 +436,12 @@ gtk_column_view_column_queue_resize (GtkColumnViewColumn *self)
 {
   GtkColumnViewCellWidget *cell;
 
-  if (self->minimum_size_request < 0)
+  if (self->minimum_size_request < 0 && self->cells_resize_queued)
     return;
 
   self->minimum_size_request = -1;
   self->natural_size_request = -1;
+  self->cells_resize_queued = TRUE;
 
   if (self->header)
     gtk_widget_queue_resize (self->header);
@@ -447,6 +449,37 @@ gtk_column_view_column_queue_resize (GtkColumnViewColumn *self)
   for (cell = self->first_cell; cell; cell = gtk_column_view_cell_widget_get_next (cell))
     {
       gtk_widget_queue_resize (GTK_WIDGET (cell));
+    }
+}
+
+/* Called when the header or a cell changed size. That can change the width
+ * of the column, so the rows need to be allocated again, but the other cells
+ * keep their sizes, so unlike gtk_column_view_column_queue_resize() this
+ * keeps their size requests. */
+void
+gtk_column_view_column_child_resized (GtkColumnViewColumn *self)
+{
+  GtkColumnViewCellWidget *cell;
+  GtkWidget *row;
+
+  if (self->minimum_size_request < 0)
+    return;
+
+  self->minimum_size_request = -1;
+  self->natural_size_request = -1;
+
+  if (self->header)
+    {
+      row = _gtk_widget_get_parent (self->header);
+      if (row)
+        gtk_widget_queue_resize (row);
+    }
+
+  for (cell = self->first_cell; cell; cell = gtk_column_view_cell_widget_get_next (cell))
+    {
+      row = _gtk_widget_get_parent (GTK_WIDGET (cell));
+      if (row)
+        gtk_widget_queue_resize (row);
     }
 }
 
@@ -491,6 +524,8 @@ gtk_column_view_column_measure (GtkColumnViewColumn *self,
       self->minimum_size_request = min;
       self->natural_size_request = nat;
     }
+
+  self->cells_resize_queued = FALSE;
 
   *minimum = self->minimum_size_request;
   *natural = self->natural_size_request;

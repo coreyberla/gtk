@@ -191,7 +191,7 @@ gtk_column_view_title_resize_func (GtkWidget *widget)
   GtkColumnViewTitle *self = GTK_COLUMN_VIEW_TITLE (widget);
 
   if (self->column)
-    gtk_column_view_column_queue_resize (self->column);
+    gtk_column_view_column_child_resized (self->column);
 }
 
 static void

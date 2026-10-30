@@ -40,6 +40,7 @@ GtkWidget *             gtk_column_view_column_get_header               (GtkColu
 void                    gtk_column_view_column_update_factory           (GtkColumnViewColumn    *self,
                                                                          gboolean                inert);
 void                    gtk_column_view_column_queue_resize             (GtkColumnViewColumn    *self);
+void                    gtk_column_view_column_child_resized            (GtkColumnViewColumn    *self);
 void                    gtk_column_view_column_measure                  (GtkColumnViewColumn    *self,
                                                                          int                    *minimum,
                                                                          int                    *natural);

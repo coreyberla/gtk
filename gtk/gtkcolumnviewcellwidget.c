@@ -333,7 +333,7 @@ gtk_column_view_cell_widget_resize_func (GtkWidget *widget)
   GtkColumnViewCellWidget *self = GTK_COLUMN_VIEW_CELL_WIDGET (widget);
 
   if (self->column)
-    gtk_column_view_column_queue_resize (self->column);
+    gtk_column_view_column_child_resized (self->column);
 }
 
 static void
