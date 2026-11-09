@@ -476,6 +476,15 @@ gtk_inscription_get_layout_location (GtkInscription *self,
       /* yalign is 0 because we can't support yalign while baseline aligning */
       y = baseline - layout_baseline;
     }
+  else if (pango_layout_get_line_count (self->layout) == 1)
+    {
+      /* A single line can be taller than our font metrics, e.g. when a
+       * fallback font with large ascent/descent is used for Arabic.
+       * Don't clamp, so the overflow is split according to yalign
+       * instead of all going out the bottom.
+       */
+      y = floor ((widget_height - logical.height) * self->yalign);
+    }
   else if (pango_layout_is_ellipsized (self->layout))
     {
       y = 0.f;
@@ -582,14 +591,35 @@ gtk_inscription_snapshot (GtkWidget   *widget,
                           GtkSnapshot *snapshot)
 {
   GtkInscription *self = GTK_INSCRIPTION (widget);
+  const int width = gtk_widget_get_width (widget);
+  const int height = gtk_widget_get_height (widget);
+  graphene_rect_t clip;
   float lx, ly;
   GtkCssBoxes boxes;
 
   if (!self->text || (*self->text == '\0'))
     return;
 
-  gtk_snapshot_push_clip (snapshot, &GRAPHENE_RECT_INIT(0, 0, gtk_widget_get_width (widget), gtk_widget_get_height (widget)));
   gtk_inscription_get_layout_location (self, &lx, &ly);
+
+  clip = GRAPHENE_RECT_INIT (0, 0, width, height);
+
+  /* With a single line there is no partial next line to hide, so only
+   * clip horizontally and let glyphs that are taller than the font
+   * metrics (marks above/below Arabic letters, etc.) overflow vertically.
+   */
+  if (pango_layout_get_line_count (self->layout) == 1)
+    {
+      PangoRectangle ink;
+      float top, bottom;
+
+      pango_layout_get_pixel_extents (self->layout, &ink, NULL);
+      top = MIN (0, ly + ink.y);
+      bottom = MAX (height, ly + ink.y + ink.height);
+      graphene_rect_init (&clip, 0, top, width, bottom - top);
+    }
+
+  gtk_snapshot_push_clip (snapshot, &clip);
 
   gtk_css_boxes_init (&boxes, widget);
   gtk_css_style_snapshot_layout (&boxes, snapshot, lx, ly, self->layout);
