@@ -288,6 +288,14 @@
 typedef struct _GtkLabelClass         GtkLabelClass;
 typedef struct _GtkLabelSelectionInfo GtkLabelSelectionInfo;
 
+typedef struct
+{
+  int minimum;
+  int natural;
+  int minimum_baseline;
+  int natural_baseline;
+} GtkLabelSize;
+
 struct _GtkLabel
 {
   GtkWidget parent_instance;
@@ -321,8 +329,16 @@ struct _GtkLabel
   guint    single_line_mode   : 1;
   guint    in_click           : 1;
   guint    track_links        : 1;
+  guint    size_cache_valid   : 2; /* one bit per GtkOrientation */
 
   guint    mnemonic_keyval;
+
+  /* Cached results of measuring the label, see gtk_label_measure().
+   * Only valid while the corresponding bit in size_cache_valid is set
+   * and the Pango context serial is unchanged.
+   */
+  GtkLabelSize size_cache[2];
+  guint        size_cache_context_serial;
 
   int      width_chars;
   int      max_width_chars;
@@ -460,6 +476,7 @@ static void gtk_label_ensure_select_info  (GtkLabel *self);
 static void gtk_label_clear_select_info   (GtkLabel *self);
 static void gtk_label_clear_provider_info (GtkLabel *self);
 static void gtk_label_clear_layout        (GtkLabel *self);
+static void gtk_label_invalidate_size_cache (GtkLabel *self);
 static void gtk_label_ensure_layout       (GtkLabel *self);
 static void gtk_label_select_region_index (GtkLabel *self,
                                            int       anchor_index,
@@ -923,6 +940,11 @@ gtk_label_update_layout_attributes (GtkLabel      *self,
   attrs = _gtk_pango_attr_list_merge (attrs, self->markup_attrs);
   attrs = _gtk_pango_attr_list_merge (attrs, self->attrs);
 
+  /* Pango ignores setting identical attributes, so only throw away
+   * the cached sizes if the attributes actually change. */
+  if (!pango_attr_list_equal (pango_layout_get_attributes (self->layout), attrs))
+    gtk_label_invalidate_size_cache (self);
+
   pango_layout_set_attributes (self->layout, attrs);
 
   pango_attr_list_unref (attrs);
@@ -1073,8 +1095,14 @@ gtk_label_get_measuring_layout (GtkLabel    *self,
   /* We can use the label's own layout if we're not allocated a size yet,
    * because we don't need it to be properly setup at that point.
    * This way we can make use of caching upon the label's creation.
+   *
+   * The same is true if we're going to get a new allocation anyway,
+   * because gtk_label_size_allocate() will set the layout's width again.
+   * This is the common case for labels that get new text, like labels in
+   * recycled list rows, and it avoids copying the layout.
    */
-  if (gtk_widget_get_width (GTK_WIDGET (self)) <= 1)
+  if (gtk_widget_get_width (GTK_WIDGET (self)) <= 1 ||
+      _gtk_widget_get_alloc_needed (GTK_WIDGET (self)))
     {
       g_object_ref (self->layout);
       pango_layout_set_width (self->layout, width);
@@ -1156,46 +1184,46 @@ get_default_widths (GtkLabel    *self,
     }
 }
 
+/* Computes the size of a non-wrapping label. The size does not depend
+ * on the size in the other orientation, so we compute both orientations
+ * from the same layout at once.
+ */
 static void
-get_static_size (GtkLabel       *self,
-                 GtkOrientation  orientation,
-                 int            *minimum,
-                 int            *natural,
-                 int            *minimum_baseline,
-                 int            *natural_baseline)
+get_static_size (GtkLabel     *self,
+                 GtkLabelSize *horizontal,
+                 GtkLabelSize *vertical)
 {
   int minimum_default, natural_default;
   PangoLayout *layout;
+  int width, height;
 
   get_default_widths (self, &minimum_default, &natural_default);
 
   layout = gtk_label_get_measuring_layout (self, NULL, self->ellipsize ? natural_default : -1);
 
-  if (orientation == GTK_ORIENTATION_HORIZONTAL)
-    {
-      pango_layout_get_size (layout, natural, NULL);
-      if (self->ellipsize)
-        {
-          layout = gtk_label_get_measuring_layout (self, layout, 0);
-          pango_layout_get_size (layout, minimum, NULL);
-          /* yes, Pango ellipsizes even when that needs more space */
-          *minimum = MIN (*minimum, *natural);
-        }
-      else
-        *minimum = *natural;
+  pango_layout_get_size (layout, &width, &height);
 
-      if (minimum_default > *minimum)
-        *minimum = minimum_default;
-      *natural = MAX (*minimum, *natural);
+  vertical->minimum = height;
+  vertical->natural = height;
+  vertical->minimum_baseline = pango_layout_get_baseline (layout);
+  vertical->natural_baseline = vertical->minimum_baseline;
+
+  horizontal->natural = width;
+  if (self->ellipsize)
+    {
+      layout = gtk_label_get_measuring_layout (self, layout, 0);
+      pango_layout_get_size (layout, &horizontal->minimum, NULL);
+      /* yes, Pango ellipsizes even when that needs more space */
+      horizontal->minimum = MIN (horizontal->minimum, horizontal->natural);
     }
   else
-    {
-      pango_layout_get_size (layout, NULL, minimum);
-      *minimum_baseline = pango_layout_get_baseline (layout);
+    horizontal->minimum = horizontal->natural;
 
-      *natural = *minimum;
-      *natural_baseline = *minimum_baseline;
-    }
+  if (minimum_default > horizontal->minimum)
+    horizontal->minimum = minimum_default;
+  horizontal->natural = MAX (horizontal->minimum, horizontal->natural);
+  horizontal->minimum_baseline = -1;
+  horizontal->natural_baseline = -1;
 
   g_object_unref (layout);
 }
@@ -1342,6 +1370,57 @@ get_width_for_height (GtkLabel *self,
 }
 
 static void
+gtk_label_size_to_pixels (GtkLabelSize *size)
+{
+  size->minimum = PANGO_PIXELS_CEIL (size->minimum);
+  size->natural = PANGO_PIXELS_CEIL (size->natural);
+  if (size->minimum_baseline > 0)
+    size->minimum_baseline = PANGO_PIXELS_CEIL (size->minimum_baseline);
+  if (size->natural_baseline > 0)
+    size->natural_baseline = PANGO_PIXELS_CEIL (size->natural_baseline);
+}
+
+static void
+gtk_label_invalidate_size_cache (GtkLabel *self)
+{
+  self->size_cache_valid = 0;
+}
+
+static gboolean
+gtk_label_size_cache_is_valid (GtkLabel       *self,
+                               GtkOrientation  orientation)
+{
+  if ((self->size_cache_valid & (1 << orientation)) == 0)
+    return FALSE;
+
+  /* Font, resolution or font option changes are applied to the
+   * context, and the layout picks them up on its own. */
+  g_assert (self->layout != NULL);
+  if (pango_context_get_serial (pango_layout_get_context (self->layout)) != self->size_cache_context_serial)
+    {
+      gtk_label_invalidate_size_cache (self);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static void
+gtk_label_size_cache_store (GtkLabel           *self,
+                            GtkOrientation      orientation,
+                            const GtkLabelSize *size)
+{
+  /* We always have a layout after measuring */
+  g_assert (self->layout != NULL);
+
+  if (self->size_cache_valid == 0)
+    self->size_cache_context_serial = pango_context_get_serial (pango_layout_get_context (self->layout));
+
+  self->size_cache[orientation] = *size;
+  self->size_cache_valid |= 1 << orientation;
+}
+
+static void
 gtk_label_measure (GtkWidget      *widget,
                    GtkOrientation  orientation,
                    int             for_size,
@@ -1351,23 +1430,65 @@ gtk_label_measure (GtkWidget      *widget,
                    int            *natural_baseline)
 {
   GtkLabel *self = GTK_LABEL (widget);
+  GtkLabelSize size;
+  gboolean cacheable;
 
-  if (for_size > 0)
-    for_size *= PANGO_SCALE;
+  /* The size of a non-wrapping label does not depend on for_size, and
+   * the unconstrained size of a wrapping label only depends on its
+   * contents. Measuring labels needs a Pango layout, which is expensive,
+   * especially for ellipsized labels where it needs multiple layout runs.
+   * So we keep the results around until the contents change.
+   *
+   * This matters when many labels get measured repeatedly, like in a
+   * GtkColumnView where all the cells of a column are measured to
+   * determine the width of that column.
+   */
+  cacheable = !self->wrap || for_size < 0;
 
-  if (!self->wrap)
-    get_static_size (self, orientation, minimum, natural, minimum_baseline, natural_baseline);
-  else if (orientation == GTK_ORIENTATION_VERTICAL)
-    get_height_for_width (self, for_size, minimum, natural, minimum_baseline, natural_baseline);
+  if (cacheable && gtk_label_size_cache_is_valid (self, orientation))
+    {
+      size = self->size_cache[orientation];
+    }
+  else if (!self->wrap)
+    {
+      GtkLabelSize sizes[2];
+
+      get_static_size (self,
+                       &sizes[GTK_ORIENTATION_HORIZONTAL],
+                       &sizes[GTK_ORIENTATION_VERTICAL]);
+
+      gtk_label_size_to_pixels (&sizes[GTK_ORIENTATION_HORIZONTAL]);
+      gtk_label_size_to_pixels (&sizes[GTK_ORIENTATION_VERTICAL]);
+
+      /* We got the other orientation for free, so keep it, too */
+      gtk_label_size_cache_store (self, GTK_ORIENTATION_HORIZONTAL, &sizes[GTK_ORIENTATION_HORIZONTAL]);
+      gtk_label_size_cache_store (self, GTK_ORIENTATION_VERTICAL, &sizes[GTK_ORIENTATION_VERTICAL]);
+
+      size = sizes[orientation];
+    }
   else
-    get_width_for_height (self, for_size, minimum, natural);
+    {
+      size.minimum_baseline = -1;
+      size.natural_baseline = -1;
 
-  *minimum = PANGO_PIXELS_CEIL (*minimum);
-  *natural = PANGO_PIXELS_CEIL (*natural);
-  if (*minimum_baseline > 0)
-    *minimum_baseline = PANGO_PIXELS_CEIL (*minimum_baseline);
-  if (*natural_baseline > 0)
-    *natural_baseline = PANGO_PIXELS_CEIL (*natural_baseline);
+      if (for_size > 0)
+        for_size *= PANGO_SCALE;
+
+      if (orientation == GTK_ORIENTATION_VERTICAL)
+        get_height_for_width (self, for_size, &size.minimum, &size.natural, &size.minimum_baseline, &size.natural_baseline);
+      else
+        get_width_for_height (self, for_size, &size.minimum, &size.natural);
+
+      gtk_label_size_to_pixels (&size);
+
+      if (cacheable)
+        gtk_label_size_cache_store (self, orientation, &size);
+    }
+
+  *minimum = size.minimum;
+  *natural = size.natural;
+  *minimum_baseline = size.minimum_baseline;
+  *natural_baseline = size.natural_baseline;
 }
 
 void
@@ -4142,6 +4263,7 @@ gtk_label_set_width_chars (GtkLabel *self,
     {
       self->width_chars = n_chars;
       g_object_notify_by_pspec (G_OBJECT (self), label_props[PROP_WIDTH_CHARS]);
+      gtk_label_invalidate_size_cache (self);
       gtk_widget_queue_resize (GTK_WIDGET (self));
     }
 }
@@ -4182,6 +4304,7 @@ gtk_label_set_max_width_chars (GtkLabel *self,
       self->max_width_chars = n_chars;
 
       g_object_notify_by_pspec (G_OBJECT (self), label_props[PROP_MAX_WIDTH_CHARS]);
+      gtk_label_invalidate_size_cache (self);
       gtk_widget_queue_resize (GTK_WIDGET (self));
     }
 }
@@ -4330,6 +4453,7 @@ gtk_label_set_natural_wrap_mode (GtkLabel           *self,
       self->natural_wrap_mode = wrap_mode;
       g_object_notify_by_pspec (G_OBJECT (self), label_props[PROP_NATURAL_WRAP_MODE]);
 
+      gtk_label_invalidate_size_cache (self);
       gtk_widget_queue_resize (GTK_WIDGET (self));
     }
 }
@@ -4358,6 +4482,7 @@ static void
 gtk_label_clear_layout (GtkLabel *self)
 {
   g_clear_object (&self->layout);
+  gtk_label_invalidate_size_cache (self);
 }
 
 static void
