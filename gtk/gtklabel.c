@@ -1095,14 +1095,8 @@ gtk_label_get_measuring_layout (GtkLabel    *self,
   /* We can use the label's own layout if we're not allocated a size yet,
    * because we don't need it to be properly setup at that point.
    * This way we can make use of caching upon the label's creation.
-   *
-   * The same is true if we're going to get a new allocation anyway,
-   * because gtk_label_size_allocate() will set the layout's width again.
-   * This is the common case for labels that get new text, like labels in
-   * recycled list rows, and it avoids copying the layout.
    */
-  if (gtk_widget_get_width (GTK_WIDGET (self)) <= 1 ||
-      _gtk_widget_get_alloc_needed (GTK_WIDGET (self)))
+  if (gtk_widget_get_width (GTK_WIDGET (self)) <= 1)
     {
       g_object_ref (self->layout);
       pango_layout_set_width (self->layout, width);
