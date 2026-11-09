@@ -476,7 +476,8 @@ gtk_inscription_get_layout_location (GtkInscription *self,
       /* yalign is 0 because we can't support yalign while baseline aligning */
       y = baseline - layout_baseline;
     }
-  else if (pango_layout_get_line_count (self->layout) == 1)
+  else if (pango_layout_get_line_count (self->layout) == 1 &&
+           logical.height > widget_height)
     {
       /* A single line can be taller than our font metrics, e.g. when a
        * fallback font with large ascent/descent is used for Arabic.

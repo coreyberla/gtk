@@ -385,6 +385,8 @@ testdata = [
   'image-sizing.ui',
   'inscription-markup.ref.ui',
   'inscription-markup.ui',
+  'inscription-overdraw-vertical.ref.ui',
+  'inscription-overdraw-vertical.ui',
   'inscription-overflow.ref.ui',
   'inscription-overflow.ui',
   'inscription-overflow-multiline.ref.ui',
